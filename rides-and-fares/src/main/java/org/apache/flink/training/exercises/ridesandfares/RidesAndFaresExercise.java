@@ -19,7 +19,14 @@
 package org.apache.flink.training.exercises.ridesandfares;
 
 import org.apache.flink.api.common.JobExecutionResult;
+import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.runtime.state.KeyValueStateIterator;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.co.RichCoFlatMapFunction;
@@ -74,7 +81,7 @@ public class RidesAndFaresExercise {
         DataStream<TaxiFare> fares = env.addSource(fareSource).keyBy(fare -> fare.rideId);
 
         // Create the pipeline.
-        rides.connect(fares).flatMap(new EnrichmentFunction()).addSink(sink);
+        rides.connect(fares).flatMap(new EnrichmentFunctionWithValueState()).addSink(sink);
 
         // Execute the pipeline and return the result.
         return env.execute("Join Rides with Fares");
@@ -98,20 +105,103 @@ public class RidesAndFaresExercise {
 
     public static class EnrichmentFunction
             extends RichCoFlatMapFunction<TaxiRide, TaxiFare, RideAndFare> {
+        private transient MapState<Long, TaxiRide> taxiRideState;
+        private transient MapState<Long, TaxiFare> taxiFareState;
 
         @Override
         public void open(Configuration config) throws Exception {
-            throw new MissingSolutionException();
+            MapStateDescriptor<Long, TaxiRide> taxiRideDescriptor = new MapStateDescriptor<Long, TaxiRide>(
+                    "taxiRideMap",
+                    BasicTypeInfo.LONG_TYPE_INFO,
+                    TypeInformation.of(TaxiRide.class)
+            );
+            MapStateDescriptor<Long, TaxiFare> taxiFareDescriptor = new MapStateDescriptor<Long, TaxiFare>(
+                    "taxiFareMap",
+                    BasicTypeInfo.LONG_TYPE_INFO,
+                    TypeInformation.of(TaxiFare.class)
+            );
+
+            taxiRideState = getRuntimeContext().getMapState(taxiRideDescriptor);
+            taxiFareState = getRuntimeContext().getMapState(taxiFareDescriptor);
         }
 
         @Override
         public void flatMap1(TaxiRide ride, Collector<RideAndFare> out) throws Exception {
-            throw new MissingSolutionException();
+            if (taxiFareState.contains(ride.rideId))
+            {
+                TaxiFare fare = taxiFareState.get(ride.rideId);
+                taxiFareState.remove(ride.rideId);
+                out.collect(new RideAndFare(ride, fare));
+            }
+            else if(!taxiRideState.contains(ride.rideId))
+            {
+                taxiRideState.put(ride.rideId, ride);
+            }
         }
 
         @Override
         public void flatMap2(TaxiFare fare, Collector<RideAndFare> out) throws Exception {
-            throw new MissingSolutionException();
+            if (taxiRideState.contains(fare.rideId))
+            {
+                TaxiRide ride = taxiRideState.get(fare.rideId);
+                taxiRideState.remove(fare.rideId);
+                out.collect(new RideAndFare(ride, fare));
+            }
+            else if(!taxiFareState.contains(fare.rideId))
+            {
+                taxiFareState.put(fare.rideId, fare);
+            }
+        }
+    }
+
+    public static class EnrichmentFunctionWithValueState
+            extends RichCoFlatMapFunction<TaxiRide, TaxiFare, RideAndFare> {
+        private transient ValueState<TaxiRide> taxiRideState;
+        private transient ValueState<TaxiFare> taxiFareState;
+
+        @Override
+        public void open(Configuration config) throws Exception {
+            ValueStateDescriptor<TaxiRide> taxiRideDescriptor = new ValueStateDescriptor<TaxiRide>(
+                    "taxiRideMap",
+                    TypeInformation.of(TaxiRide.class)
+            );
+            ValueStateDescriptor<TaxiFare> taxiFareDescriptor = new ValueStateDescriptor<TaxiFare>(
+                    "taxiFareMap",
+                    TypeInformation.of(TaxiFare.class)
+            );
+
+            taxiRideState = getRuntimeContext().getState(taxiRideDescriptor);
+            taxiFareState = getRuntimeContext().getState(taxiFareDescriptor);
+        }
+
+        @Override
+        public void flatMap1(TaxiRide ride, Collector<RideAndFare> out) throws Exception {
+
+            TaxiFare fare = taxiFareState.value();
+            if (fare == null)
+            {
+                taxiRideState.update(ride);
+            }
+            else
+            {
+                taxiFareState.clear();
+                out.collect(new RideAndFare(ride, fare));
+            }
+        }
+
+        @Override
+        public void flatMap2(TaxiFare fare, Collector<RideAndFare> out) throws Exception {
+            TaxiRide ride = taxiRideState.value();
+            if (ride == null)
+            {
+                taxiFareState.update(fare);
+            }
+            else
+            {
+                taxiRideState.clear();
+                out.collect(new RideAndFare(ride, fare));
+            }
         }
     }
 }
+
